@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-KAFKA_DIR="${KAFKA_DIR:-$HOME/kafka_2.13-3.8.0}"
+KAFKA_CONTAINER="${KAFKA_CONTAINER:-kafka}"
 BS="${BS:-localhost:9092}"
 
 TOPICS=(
@@ -11,22 +11,32 @@ TOPICS=(
   indexed-events
 )
 
+echo "Using Kafka container: $KAFKA_CONTAINER"
+echo "Bootstrap server: $BS"
+echo
+
 for t in "${TOPICS[@]}"; do
   echo "== Topic: $t =="
 
-  # delete if exists
-  if "$KAFKA_DIR/bin/kafka-topics.sh" --bootstrap-server "$BS" --list | grep -qx "$t"; then
+  if docker exec "$KAFKA_CONTAINER" kafka-topics \
+       --bootstrap-server "$BS" \
+       --list | grep -qx "$t"; then
     echo "Deleting $t"
-    "$KAFKA_DIR/bin/kafka-topics.sh" --bootstrap-server "$BS" --delete --topic "$t" || true
+    docker exec "$KAFKA_CONTAINER" kafka-topics \
+      --bootstrap-server "$BS" \
+      --delete \
+      --topic "$t" || true
+  else
+    echo "Topic $t does not exist"
   fi
 done
 
-# Give Kafka a moment to actually delete (sometimes async)
+# Kafka deletes topics asynchronously
 sleep 2
 
 for t in "${TOPICS[@]}"; do
   echo "Creating $t"
-  "$KAFKA_DIR/bin/kafka-topics.sh" \
+  docker exec "$KAFKA_CONTAINER" kafka-topics \
     --bootstrap-server "$BS" \
     --create \
     --topic "$t" \
@@ -34,4 +44,5 @@ for t in "${TOPICS[@]}"; do
     --replication-factor 1 || true
 done
 
+echo
 echo "Done."
