@@ -13,6 +13,7 @@ from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Range
 from sentence_transformers import SentenceTransformer
 
 from openai import OpenAI
+import json
 
 
 # Optional: location geocoding
@@ -173,7 +174,7 @@ def build_filter(
             FieldCondition(key="source", match=MatchValue(value=source))
         )
 
-    if event_type:
+    if event_type and event_type != "Not Mentioned":
         must.append(
             FieldCondition(
                 key="event_type", match=MatchValue(value=event_type)
@@ -182,29 +183,13 @@ def build_filter(
 
     if not must:
         return None
+
     return Filter(must=must)
 
 
 # -----------------------------
 # Location extraction + geocoding
 # -----------------------------
-_PLACE_PAT = re.compile(
-    r"\b(?:in|near|around|at|within)\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9 ,.\-']{2,})\b",
-    flags=re.IGNORECASE,
-)
-
-
-def extract_location_from_query(query: str) -> Optional[str]:
-    """
-    Extract a likely place phrase from the query.
-      "earthquakes in California" -> "California"
-      "flood near Lyon" -> "Lyon"
-    """
-    m = _PLACE_PAT.search(query)
-    if not m:
-        return None
-    place = m.group(1).strip(" .,'\"")
-    return place or None
 
 
 def geocode_place(place: str) -> Optional[Tuple[str, float, float]]:
@@ -241,18 +226,6 @@ def parse_latlon(s: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
         return None, None
 
 
-def detect_query_location(query: str) -> Optional[Tuple[str, float, float]]:
-    """
-    General detection:
-    - Try to extract a place phrase using simple heuristics (in/near/around...)
-    - Geocode that phrase
-    """
-    place = extract_location_from_query(query)
-    if not place:
-        return None
-    return geocode_place(place)
-
-
 def build_context(rows):
     # rows: list of (final, sim, sscore, tscore, dist_km, r)
     lines = []
@@ -273,6 +246,59 @@ def build_context(rows):
             f"  url={p.get('url','N/A')}"
         )
     return latest, current_time_str, "\n".join(lines)
+
+
+# -----------------------------
+# Intent Extraction (Query Engineering)
+# -----------------------------
+def extract_query_intent(query: str, client: OpenAI) -> Dict[str, Any]:
+    """Uses LLM to extract category and location (uses 'Global' if no specific place is mentioned) from the user query."""
+    val_categories = [
+        "drought",
+        "dustHaze",
+        "earthquakes",
+        "floods",
+        "landslides",
+        "manmade",
+        "seaLakeIce",
+        "severeStorms",
+        "snow",
+        "tempExtremes",
+        "volcanoes",
+        "waterColor",
+        "wildfires",
+    ]
+
+    system_prompt = f"""
+    Extract search parameters from the user query.
+    Valid categories (IDs): {val_categories}
+    
+    Return ONLY a JSON object:
+    {{
+      "category": "one of the valid IDs or 'Not Mentioned' if it doesn't fit any ID",
+      "location": "the place name, or 'Global' if no specific place is mentioned",
+      "search_query": "clean keyword version of the query"
+    }}
+    """
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query},
+            ],
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content
+        return json.loads(content)
+    except Exception as e:
+        print(f"DEBUG ERROR: {e}")
+        # Fallback if LLM fails
+        return {
+            "category": "Not Mentioned",
+            "location": "Global",
+            "search_query": query,
+        }
 
 
 # -----------------------------
@@ -308,13 +334,13 @@ def main():
     parser.add_argument(
         "--sigma-km",
         type=float,
-        default=600.0,
+        default=2000.0,
         help="Spatial softness (higher = less restrictive)",
     )
     parser.add_argument(
         "--tau-min",
         type=float,
-        default=60.0,
+        default=360.0,
         help="Recency decay time constant in minutes",
     )
     parser.add_argument(
@@ -354,11 +380,26 @@ def main():
     print(f"Embedding model: {model_name}")
     print(f"Query: {args.query}\n")
 
+    ## Adding an LLM to get the query information
+    client = OpenAI(
+        api_key=os.environ.get("GROQ_API_KEY", "TO_REPLACE"),
+        base_url="https://api.groq.com/openai/v1",
+    )
+
+    intent = extract_query_intent(args.query, client)
+
+    # Let's extract the variables we need
+    extracted_loc = intent.get("location", "Global")
+    final_type = intent.get("category")
+    search_terms = intent.get("search_query", args.query)
+
+    print(f"Query Intent: Category={final_type}, Location={extracted_loc}")
+
     model = SentenceTransformer(model_name)
     qdrant = QdrantClient(url=qdrant_url)
 
-    query_vec = model.encode(args.query).tolist()
-    flt = build_filter(args.minutes, args.source, args.type)
+    query_vec = model.encode(search_terms).tolist()
+    flt = build_filter(args.minutes, args.source, final_type)
 
     # 1) Retrieve by semantics (dominant)
     limit = max(args.topk * args.overfetch, args.topk)
@@ -378,28 +419,13 @@ def main():
 
     # 2) Determine query lat/lon (reference point for distance)
     qlat, qlon = parse_latlon(args.qgeo)
-    loc_name = None
 
-    if (qlat is not None) and (qlon is not None):
-        loc_name = "override(--qgeo)"
-        print(f"Using query coords: ({qlat:.6f}, {qlon:.6f})\n")
-    else:
-        loc = detect_query_location(args.query)
-        if loc is not None:
-            loc_name, qlat, qlon = loc
-            print(
-                f"Detected location: {loc_name}  ->  ({qlat:.6f}, {qlon:.6f})\n"
-            )
-        else:
-            if Nominatim is None:
-                print(
-                    "No query location detected (geopy not installed). "
-                    "Install with: pip install geopy\n"
-                )
-            else:
-                print(
-                    "No query location detected from text; spatial bias will be neutral.\n"
-                )
+    # Only attempt geocoding if NOT Global and no override is provided
+    if qlat is None and extracted_loc.lower() != "global":
+        loc = geocode_place(extracted_loc)
+        if loc:
+            _, qlat, qlon = loc
+            print(f"Detected location: {extracted_loc} -> ({qlat}, {qlon})")
 
     # 3) First compute features (sim, time, distance, spatial score) for all candidates
     scored: List[Tuple[float, float, float, float, Optional[float], Any]] = []
@@ -523,13 +549,11 @@ def main():
     Context:
     {ctx}
     """
-        client = OpenAI(
-            api_key=os.environ.get("GROQ_API_KEY", "TO_REPLACE"),
-            base_url="https://api.groq.com/openai/v1",
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
         )
-        model = "llama-3.3-70b-versatile"
-        resp = client.responses.create(model=model, input=prompt)
-        print(resp.output_text)
+        print(resp.choices[0].message.content)
         return
 
 

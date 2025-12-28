@@ -75,7 +75,7 @@ def usgs_feature_to_event(feature: Dict) -> Optional[Dict]:
         "event_id": f"{SOURCE_NAME}:{event_id}",
         "timestamp_utc_ms": int(t_ms),
         "source": SOURCE_NAME,
-        "event_type": "earthquake",
+        "event_type": "earthquakes",
         "text": text,
         "url": url,
         "geo": {"lat": lat, "lon": lon},
