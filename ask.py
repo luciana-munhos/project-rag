@@ -257,6 +257,10 @@ def build_context(rows):
     # rows: list of (final, sim, sscore, tscore, dist_km, r)
     lines = []
     latest = None
+    current_time_str = dt.datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
     for final, sim, sscore, tscore, dist_km, r in rows:
         p = r.payload or {}
         ts = p.get("timestamp_utc_ms")
@@ -268,7 +272,7 @@ def build_context(rows):
             f"  text={extract_text(p)}\n"
             f"  url={p.get('url','N/A')}"
         )
-    return latest, "\n".join(lines)
+    return latest, current_time_str, "\n".join(lines)
 
 
 # -----------------------------
@@ -495,24 +499,30 @@ def main():
 
     # 6) Optional LLM final answer
     if args.llm:
-        latest_ts, ctx = build_context(reranked)
+        latest_ts, now_str, ctx = build_context(reranked)
 
         asof = ms_to_utc_str(latest_ts) if latest_ts is not None else "N/A"
+
         prompt = f"""You are a real-time disaster/event monitor.
-    Use ONLY the context below (do not invent facts).
-    If the context is insufficient or off-topic, say so and suggest widening the time window.
+
+    Current System Time: {now_str}
+    Latest Event in Database: {asof}
 
     User question: {args.query}
 
-    Context (verified events):
+    INSTRUCTIONS:
+    1. Start your response by clearly stating: "Report generated at {now_str}."
+    2. Summarize the situation  based ONLY on the context below. If the context is insufficient or off-topic, say so and suggest widening the time window.
+    3. Begin the summary with the phrase: "As of {asof}, ..."
+    4. If the latest data ({asof}) is older than 24 hours relative to {now_str}, you have to state that there are no new reports in the last 24 hours."
+    5. Provide the response in the following format:
+    - A short summary (starting as instructed above).
+    - Bullet points of the key confirmed facts.
+    - A "Sources" list with the URLs used from the context.
+
+    Context:
     {ctx}
-
-    Write:
-    1) A short summary starting with: "As of {asof}, ..."
-    2) Bullet points of the key confirmed facts
-    3) A "Sources" list with the URLs you used
     """
-
         client = OpenAI(
             api_key=os.environ.get("GROQ_API_KEY", "TO_REPLACE"),
             base_url="https://api.groq.com/openai/v1",
