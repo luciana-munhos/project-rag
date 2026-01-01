@@ -1,4 +1,4 @@
-# Real-Time Environmental Events RAG (Dockerized Architecture)
+# Real-Time Environmental Events RAG
 
 This project implements a real-time data pipeline for environmental and disaster events
 (USGS Earthquakes, NASA EONET alerts, and GDACS disaster notifications).
