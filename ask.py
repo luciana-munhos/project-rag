@@ -15,9 +15,6 @@ from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 import json
 
-
-# Optional: location geocoding
-# pip install geopy
 try:
     from geopy.geocoders import Nominatim
 except Exception:
@@ -95,6 +92,13 @@ def extract_place(payload: Dict[str, Any]) -> str:
     if isinstance(raw, dict) and raw.get("place"):
         return str(raw["place"])
 
+    # GDACS-style payload
+    if isinstance(raw, dict):
+        gdacs = raw.get("gdacs")
+        if isinstance(gdacs, dict):
+            if gdacs.get("country"):
+                return str(gdacs["country"])
+
     text = payload.get("text") or payload.get("doc") or ""
     # USGS-style text: "... at <place>."
     m = re.search(r"\bat\s+(.+?)(?:\.\s*\(|\.$)", text)
@@ -114,7 +118,7 @@ def extract_text(payload: Dict[str, Any]) -> str:
 def extract_geo(payload: dict) -> Tuple[Optional[float], Optional[float]]:
     """
     Tries multiple common shapes:
-    - payload["geo"] = {"lat": .., "lon": ..}  (your case)
+    - payload["geo"] = {"lat": .., "lon": ..}
     - payload["geo"] = {"lat": .., "lng": ..}
     - payload has top-level "lat"/"lon"
     - payload["location"] = {"lat": .., "lon": ..}
@@ -122,7 +126,7 @@ def extract_geo(payload: dict) -> Tuple[Optional[float], Optional[float]]:
     if not payload:
         return None, None
 
-    # 1) Your main case
+    # main case
     geo = payload.get("geo")
     if isinstance(geo, dict):
         lat = geo.get("lat")
@@ -133,7 +137,7 @@ def extract_geo(payload: dict) -> Tuple[Optional[float], Optional[float]]:
         except (TypeError, ValueError):
             pass
 
-    # 2) sometimes stored as top-level
+    # sometimes stored as top-level
     for lat_key, lon_key in [("lat", "lon"), ("latitude", "longitude")]:
         if lat_key in payload and lon_key in payload:
             try:
@@ -141,7 +145,7 @@ def extract_geo(payload: dict) -> Tuple[Optional[float], Optional[float]]:
             except (TypeError, ValueError):
                 pass
 
-    # 3) alternate nesting
+    # alternate nesting
     loc = payload.get("location")
     if isinstance(loc, dict):
         lat = loc.get("lat")
@@ -190,8 +194,6 @@ def build_filter(
 # -----------------------------
 # Location extraction + geocoding
 # -----------------------------
-
-
 def geocode_place(place: str) -> Optional[Tuple[str, float, float]]:
     """
     Convert a place name into (display_name, lat, lon) using Nominatim via geopy.
@@ -316,7 +318,6 @@ def main():
     parser.add_argument("--source", type=str, default=None)
     parser.add_argument("--type", type=str, default=None)
 
-    # Optional override if you want to avoid geocoding:
     parser.add_argument(
         "--qgeo",
         type=str,
@@ -324,7 +325,7 @@ def main():
         help='Optional query coordinates override as "lat,lon" (e.g. "36.77,-119.41")',
     )
 
-    # Scoring knobs
+    # Scoring
     parser.add_argument(
         "--overfetch",
         type=int,
@@ -401,7 +402,7 @@ def main():
     query_vec = model.encode(search_terms).tolist()
     flt = build_filter(args.minutes, args.source, final_type)
 
-    # 1) Retrieve by semantics (dominant)
+    # Retrieve by semantics
     limit = max(args.topk * args.overfetch, args.topk)
     response = qdrant.query_points(
         collection_name=collection,
@@ -417,7 +418,7 @@ def main():
         print("No results found.")
         return
 
-    # 2) Determine query lat/lon (reference point for distance)
+    # Determine query lat/lon (reference point for distance)
     qlat, qlon = parse_latlon(args.qgeo)
 
     # Only attempt geocoding if NOT Global and no override is provided
@@ -427,7 +428,7 @@ def main():
             _, qlat, qlon = loc
             print(f"Detected location: {extracted_loc} -> ({qlat}, {qlon})")
 
-    # 3) First compute features (sim, time, distance, spatial score) for all candidates
+    # First compute features (sim, time, distance, spatial score) for all candidates
     scored: List[Tuple[float, float, float, float, Optional[float], Any]] = []
     for i, r in enumerate(points, start=1):
         payload = r.payload or {}
@@ -455,7 +456,7 @@ def main():
         # NOTE: final is computed later (after optional gating)
         scored.append((0.0, sim, sscore, tscore, dist_km, r))
 
-    # 4) OPTIONAL: spatial gate (only if we have query coords + user asked for max-km)
+    # OPTIONAL: spatial gate (only if we have query coords + user asked for max-km)
     gated = scored
     if (args.max_km is not None) and (qlat is not None) and (qlon is not None):
         min_nearby = (
@@ -480,7 +481,7 @@ def main():
                 "Showing best global matches.\n"
             )
 
-    # 5) Compute final score and rank (similarity dominant, space biases it, time small bonus)
+    # Compute final score and rank (similarity dominant, space biases it, time small bonus)
     reranked: List[Tuple[float, float, float, float, Optional[float], Any]] = (
         []
     )
@@ -523,7 +524,7 @@ def main():
         print(f"   text:     {text}")
         print("")
 
-    # 6) Optional LLM final answer
+    # Optional LLM final answer
     if args.llm:
         latest_ts, now_str, ctx = build_context(reranked)
 

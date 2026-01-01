@@ -35,12 +35,9 @@ def make_producer() -> KafkaProducer:
 
 
 def fetch_eonet_events() -> List[Dict]:
-    """Fetched from your 'old' file: correctly handles pagination to find Argentina."""
     all_events: List[Dict] = []
     page = 1
-    max_pages = (
-        10  # Reduced from 50 to keep it fast, but enough to get Argentina
-    )
+    max_pages = 10
     seen_in_this_fetch = set()
 
     while page <= max_pages:
@@ -75,7 +72,6 @@ def fetch_eonet_events() -> List[Dict]:
 
 
 def iso_to_utc_ms(s: str) -> Optional[int]:
-    """Corrected date parsing from your 'old' file."""
     try:
         # EONET gives "2025-12-21T19:05:00Z"
         t = time.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
@@ -89,7 +85,6 @@ def normalize_event(ev: Dict) -> Optional[Dict]:
     if not eid:
         return None
 
-    # Use the logic from your 'old' file to pick the best geometry
     geometry = ev.get("geometry", []) or []
     geo_item = geometry[-1] if geometry else {}
     coords = geo_item.get("coordinates")
@@ -99,7 +94,7 @@ def normalize_event(ev: Dict) -> Optional[Dict]:
         else (None, None)
     )
 
-    # Correct timestamp logic
+    # timestamp logic
     ts_ms = None
     date_str = geo_item.get("date")
     if isinstance(date_str, str):

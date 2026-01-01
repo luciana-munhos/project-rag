@@ -52,11 +52,11 @@ def clamp01(x: float) -> float:
 
 def credibility_score(ev: dict) -> float:
     """
-    Defendable heuristic score:
+    Score:
     - provenance (trusted source) is the main signal
     - completeness adds a bit
     - recency adds a bit
-    Output is rounded + stable (no float ugliness).
+    Output is rounded.
     """
     score = 0.0
 

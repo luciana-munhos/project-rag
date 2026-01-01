@@ -64,7 +64,6 @@ def parse_rfc822_to_ms(s: Optional[str]) -> Optional[int]:
     try:
         dt = parsedate_to_datetime(s)
         if dt.tzinfo is None:
-            # treat as UTC if tz missing (rare)
             return int(dt.replace(tzinfo=time.timezone).timestamp() * 1000)
         return int(dt.timestamp() * 1000)
     except Exception:
@@ -83,7 +82,6 @@ def parse_gdacs_date_to_ms(s: Optional[str]) -> Optional[int]:
 def extract_lat_lon(
     item: ET.Element,
 ) -> Tuple[Optional[float], Optional[float]]:
-    # Preferred: <geo:Point><geo:lat>...</geo:lat><geo:long>...</geo:long></geo:Point>
     lat = _text(item.find("geo:Point/geo:lat", NS))
     lon = _text(item.find("geo:Point/geo:long", NS))
     if lat and lon:
@@ -92,7 +90,6 @@ def extract_lat_lon(
         except Exception:
             pass
 
-    # Fallback: <georss:point>lat lon</georss:point>
     pt = _text(item.find("georss:point", NS))
     if pt:
         try:
@@ -155,9 +152,7 @@ def normalize_item(item: ET.Element) -> Optional[Dict]:
 
     lat, lon = extract_lat_lon(item)
 
-    # Event type mapping into your schema's "event_type"
-    # Keep GDACS codes but readable for your downstream.
-    # (Your other ingestors use "earthquakes" or category id; here we use gdacs eventtype)
+    # Event type mapping into our schema's "event_type"
     event_type_out = {
         "EQ": "earthquakes",
         "FL": "floods",
