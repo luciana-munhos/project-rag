@@ -69,7 +69,6 @@ def build_doc(ev: Dict[str, Any]) -> str:
     raw = ev.get("raw") or {}
     if isinstance(raw, dict):
         place = raw.get("place") or ""
-    # Make the searchable text rich + consistent
     parts = [
         f"type={event_type}",
         f"source={source}",
@@ -168,7 +167,7 @@ def main():
                     "doc": doc,
                 }
 
-                # ---- Critical part: upsert and verify ----
+                # ---- upsert and verify ----
                 try:
                     qdrant.upsert(
                         collection_name=COLLECTION,

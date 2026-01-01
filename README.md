@@ -1,137 +1,119 @@
-# Real-Time Environmental Events RAG
+# Real-Time Environmental Events RAG (Dockerized Architecture)
 
-This project implements a small real-time pipeline for environmental events (e.g. earthquakes and NASA EONET alerts) using **Kafka** for streaming, **Qdrant** as a vector database, and a retrieval + LLM query interface.
-
-The system ingests events, verifies them, indexes them into Qdrant, and allows semantic querying over recent events.
-
----
-
-## Architecture
-
-USGS / EONET -> Kafka (raw events) -> verify-events.py -> Kafka (verified events) ->
-index-events.py -> Qdrant (vectors) -> ask.py
+This project implements a real-time data pipeline for environmental and disaster events
+(USGS Earthquakes, NASA EONET alerts, and GDACS disaster notifications).
+It uses **Apache Kafka** for streaming, **Qdrant** as a vector database, and an
+**LLM-powered RAG engine** to interpret, filter, and summarize events.
 
 ---
 
-## Requirements
+## 1. Architecture
 
-- Ubuntu / Linux (tested on Ubuntu)
-- Python 3.10+
-- Docker + Docker Compose
-- **Local Kafka installation** (tested with Kafka 3.8.0, Scala 2.13)
+**Data Sources (USGS / EONET / GDACS)** → **Kafka (Docker)** → `verify-events.py`
+→ `index-events.py` → **Qdrant** → `ask.py` (LLM-based Retrieval & Synthesis)
 
-> Kafka and ZooKeeper are started **locally**, not via Docker.  
-> Docker Compose is only used for Qdrant.
+The pipeline uses a multi-stage approach:
+
+1. **Ingestion**  
+   Raw data is fetched from multiple public sources and published to Kafka:
+   - `ingest-usgs.py`
+   - `ingest-eonet.py`
+   - `ingest-gdacs.py`
+
+2. **Verification**  
+   `verify-events.py` consumes raw events, deduplicates and validates them,
+   and republishes verified events to a downstream Kafka topic.
+
+3. **Indexing**  
+   `index-events.py` consumes verified events, generates embeddings,
+   and upserts them into Qdrant using a *commit-after-write* offset strategy.
+
+4. **RAG Querying**  
+   `ask.py` extracts intent from user queries, performs spatiotemporal retrieval
+   over the vector database, and synthesizes a natural-language answer with an LLM.
 
 ---
 
-## Repository contents
+## 2. Requirements
 
-- `ingest-usgs.py` – ingests earthquake data from USGS into Kafka  
-- `ingest-eonet.py` – ingests NASA EONET events into Kafka  
-- `verify-events.py` – consumes raw events and outputs verified events  
-- `index-events.py` – indexes verified events into Qdrant  
-- `ask.py` – semantic querying (and optional LLM response via Groq)  
-- `docker-compose.yml` – runs Qdrant  
-- `reset-topics.sh` – Ubuntu-only helper script to delete/recreate Kafka topics  
-- `eonet_seen_ids.json` – local state file to avoid re-ingesting duplicates  
+- **OS**: Ubuntu / Linux
+- **Software**: Python 3.10+, Docker, Docker Compose
+- **API Key**: A Groq API key for LLM-based querying
 
 ---
 
-## Setup
+## 3. Setup
 
-### 1) Create and activate a virtual environment
+### Create and activate the virtual environment
 
-From the project root:
-
-bash:
 python3 -m venv datastream
 source datastream/bin/activate
 pip install -r requirements.txt
 
-You should see (datastream) in your shell prompt before running any Python script.
 
-### 2) Start ZooKeeper (Terminal 1)
+### Start the Infrastructure (Docker)
 
-Kafka must be installed locally. Example path:
-
-cd ~/kafka_2.13-3.8.0
-bin/zookeeper-server-start.sh config/zookeeper.properties
-
-### 3) Start Kafka broker (Terminal 2)
-cd ~/kafka_2.13-3.8.0
-bin/kafka-server-start.sh config/server.properties
-
-### 4) Start Qdrant (Terminal 3)
-
-From the project directory:
+This starts Kafka, Zookeeper, and Qdrant:
 sudo docker compose up -d
 
-Qdrant will be available at:
-REST API: http://localhost:6333
-gRPC: localhost:6334
+Note: Ensure your docker-compose.yml is configured for Kafka to be accessible at localhost:9092.
 
-Data is persisted in a Docker volume (qdrant_data).
+## 4. Running the Pipeline
 
-## Running the pipeline
+Run each component in a separate terminal with the virtual environment activated.
 
-Each component should be run in a separate terminal with the virtual environment activated.
+### Step 1: Processing and Indexing
+Bash
 
-### Terminal 4 - Verify events (raw → verified)
-source datastream/bin/activate
+Terminal 1: Verification (Deduplication)
 python3 verify-events.py
 
-### Terminal 5 - Index events into Qdrant
-source datastream/bin/activate
+Terminal 2: Indexing to Vector DB
 python3 index-events.py
 
-### Terminal 6 - Ingest USGS data
-source datastream/bin/activate
+## Step 2: Data Ingestion
+Terminal 3: USGS Earthquakes
 python3 ingest-usgs.py
 
-### Terminal 7 - Ingest EONET data
-source datastream/bin/activate
+Terminal 4: NASA EONET
 python3 ingest-eonet.py
 
-You may optionally use -u (python3 -u ingest-eonet.py) to force unbuffered output and see logs immediately, but it is not required.
+## Step 3: Semantic Querying (RAG)
 
-## Querying the data
+You must export your API key in the terminal session before running the query tool:
+export GROQ_API_KEY="your_actual_key_here"
 
-Once events are indexed in Qdrant:
+Run a query:
+python3 ask.py "Show me recent floods in Asia" --topk 5 --llm
 
-source datastream/bin/activate
-python3 ask.py "earthquakes in California" --topk 8 --minutes 60
+## 5. Maintenance & Resetting the System
+Full Reset (Clean Slate)
 
-## LLM configuration
+If you want to completely wipe the system state:
 
-If ask.py uses Groq’s OpenAI-compatible API, set your key as an environment variable:
+    Delete the Qdrant Collection: Always run this command before stopping Docker to ensure the vector index is properly cleared:
+    Bash
 
-export GROQ_API_KEY="YOUR_GROQ_API_KEY"
+curl -X DELETE http://localhost:6333/collections/events
 
+Stop and Wipe Docker Volumes:
+sudo docker compose down -v
 
-The key is not stored in the repository and must be provided by each user.
-
-## Kafka topic reset (optional)
-
-If you want to start from a clean Kafka state:
-
+Reset Kafka Topics: To recreate topics and clear old messages:
 bash reset-topics.sh
 
-(!) This script is Ubuntu-specific and assumes a local Kafka installation.
+## 6. Search Features (ask.py)
 
-## Local state and persistence
+- Smart Intent: Uses an LLM to automatically identify if your query is "Global" or tied to a specific "Location".
 
-- eonet_seen_ids.json tracks which EONET events were already ingested.
-- If Qdrant is reset but this file is not, ingestion may skip events.
+- Category Filtering: Automatically applies hard filters (e.g., wildfires, earthquakes) based on user intent.
 
-To fully reset ingestion state:
+- Spatiotemporal Scoring: Reranks results using: Semantic Similarity: Vector distance between query and event text;
+Spatial Bias: Proximity to the detected location (using Haversine distance); Recency Decay: Exponential time decay (e−age/τ) to prioritize fresh events.
 
-echo "[]" > eonet_seen_ids.json
+## 7. Stopping the Project
+Stop all containers
+sudo docker compose stop
 
-## Stopping everything
-### Stop Qdrant
+Remove containers
 sudo docker compose down
-
-### Stop Kafka and ZooKeeper
-(Ctrl+C in their respective terminals)
-

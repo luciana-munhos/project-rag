@@ -13,10 +13,8 @@ from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Range
 from sentence_transformers import SentenceTransformer
 
 from openai import OpenAI
+import json
 
-
-# Optional: location geocoding
-# pip install geopy
 try:
     from geopy.geocoders import Nominatim
 except Exception:
@@ -94,6 +92,13 @@ def extract_place(payload: Dict[str, Any]) -> str:
     if isinstance(raw, dict) and raw.get("place"):
         return str(raw["place"])
 
+    # GDACS-style payload
+    if isinstance(raw, dict):
+        gdacs = raw.get("gdacs")
+        if isinstance(gdacs, dict):
+            if gdacs.get("country"):
+                return str(gdacs["country"])
+
     text = payload.get("text") or payload.get("doc") or ""
     # USGS-style text: "... at <place>."
     m = re.search(r"\bat\s+(.+?)(?:\.\s*\(|\.$)", text)
@@ -113,7 +118,7 @@ def extract_text(payload: Dict[str, Any]) -> str:
 def extract_geo(payload: dict) -> Tuple[Optional[float], Optional[float]]:
     """
     Tries multiple common shapes:
-    - payload["geo"] = {"lat": .., "lon": ..}  (your case)
+    - payload["geo"] = {"lat": .., "lon": ..}
     - payload["geo"] = {"lat": .., "lng": ..}
     - payload has top-level "lat"/"lon"
     - payload["location"] = {"lat": .., "lon": ..}
@@ -121,7 +126,7 @@ def extract_geo(payload: dict) -> Tuple[Optional[float], Optional[float]]:
     if not payload:
         return None, None
 
-    # 1) Your main case
+    # main case
     geo = payload.get("geo")
     if isinstance(geo, dict):
         lat = geo.get("lat")
@@ -132,7 +137,7 @@ def extract_geo(payload: dict) -> Tuple[Optional[float], Optional[float]]:
         except (TypeError, ValueError):
             pass
 
-    # 2) sometimes stored as top-level
+    # sometimes stored as top-level
     for lat_key, lon_key in [("lat", "lon"), ("latitude", "longitude")]:
         if lat_key in payload and lon_key in payload:
             try:
@@ -140,7 +145,7 @@ def extract_geo(payload: dict) -> Tuple[Optional[float], Optional[float]]:
             except (TypeError, ValueError):
                 pass
 
-    # 3) alternate nesting
+    # alternate nesting
     loc = payload.get("location")
     if isinstance(loc, dict):
         lat = loc.get("lat")
@@ -173,7 +178,7 @@ def build_filter(
             FieldCondition(key="source", match=MatchValue(value=source))
         )
 
-    if event_type:
+    if event_type and event_type != "Not Mentioned":
         must.append(
             FieldCondition(
                 key="event_type", match=MatchValue(value=event_type)
@@ -182,31 +187,13 @@ def build_filter(
 
     if not must:
         return None
+
     return Filter(must=must)
 
 
 # -----------------------------
 # Location extraction + geocoding
 # -----------------------------
-_PLACE_PAT = re.compile(
-    r"\b(?:in|near|around|at|within)\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9 ,.\-']{2,})\b",
-    flags=re.IGNORECASE,
-)
-
-
-def extract_location_from_query(query: str) -> Optional[str]:
-    """
-    Extract a likely place phrase from the query.
-      "earthquakes in California" -> "California"
-      "flood near Lyon" -> "Lyon"
-    """
-    m = _PLACE_PAT.search(query)
-    if not m:
-        return None
-    place = m.group(1).strip(" .,'\"")
-    return place or None
-
-
 def geocode_place(place: str) -> Optional[Tuple[str, float, float]]:
     """
     Convert a place name into (display_name, lat, lon) using Nominatim via geopy.
@@ -241,22 +228,14 @@ def parse_latlon(s: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
         return None, None
 
 
-def detect_query_location(query: str) -> Optional[Tuple[str, float, float]]:
-    """
-    General detection:
-    - Try to extract a place phrase using simple heuristics (in/near/around...)
-    - Geocode that phrase
-    """
-    place = extract_location_from_query(query)
-    if not place:
-        return None
-    return geocode_place(place)
-
-
 def build_context(rows):
     # rows: list of (final, sim, sscore, tscore, dist_km, r)
     lines = []
     latest = None
+    current_time_str = dt.datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
     for final, sim, sscore, tscore, dist_km, r in rows:
         p = r.payload or {}
         ts = p.get("timestamp_utc_ms")
@@ -268,7 +247,60 @@ def build_context(rows):
             f"  text={extract_text(p)}\n"
             f"  url={p.get('url','N/A')}"
         )
-    return latest, "\n".join(lines)
+    return latest, current_time_str, "\n".join(lines)
+
+
+# -----------------------------
+# Intent Extraction (Query Engineering)
+# -----------------------------
+def extract_query_intent(query: str, client: OpenAI) -> Dict[str, Any]:
+    """Uses LLM to extract category and location (uses 'Global' if no specific place is mentioned) from the user query."""
+    val_categories = [
+        "drought",
+        "dustHaze",
+        "earthquakes",
+        "floods",
+        "landslides",
+        "manmade",
+        "seaLakeIce",
+        "severeStorms",
+        "snow",
+        "tempExtremes",
+        "volcanoes",
+        "waterColor",
+        "wildfires",
+    ]
+
+    system_prompt = f"""
+    Extract search parameters from the user query.
+    Valid categories (IDs): {val_categories}
+    
+    Return ONLY a JSON object:
+    {{
+      "category": "one of the valid IDs or 'Not Mentioned' if it doesn't fit any ID",
+      "location": "the place name, or 'Global' if no specific place is mentioned",
+      "search_query": "clean keyword version of the query"
+    }}
+    """
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query},
+            ],
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content
+        return json.loads(content)
+    except Exception as e:
+        print(f"DEBUG ERROR: {e}")
+        # Fallback if LLM fails
+        return {
+            "category": "Not Mentioned",
+            "location": "Global",
+            "search_query": query,
+        }
 
 
 # -----------------------------
@@ -286,7 +318,6 @@ def main():
     parser.add_argument("--source", type=str, default=None)
     parser.add_argument("--type", type=str, default=None)
 
-    # Optional override if you want to avoid geocoding:
     parser.add_argument(
         "--qgeo",
         type=str,
@@ -294,7 +325,7 @@ def main():
         help='Optional query coordinates override as "lat,lon" (e.g. "36.77,-119.41")',
     )
 
-    # Scoring knobs
+    # Scoring
     parser.add_argument(
         "--overfetch",
         type=int,
@@ -304,13 +335,13 @@ def main():
     parser.add_argument(
         "--sigma-km",
         type=float,
-        default=600.0,
+        default=2000.0,
         help="Spatial softness (higher = less restrictive)",
     )
     parser.add_argument(
         "--tau-min",
         type=float,
-        default=60.0,
+        default=360.0,
         help="Recency decay time constant in minutes",
     )
     parser.add_argument(
@@ -322,7 +353,7 @@ def main():
     parser.add_argument(
         "--w-time",
         type=float,
-        default=0.05,
+        default=0.1,
         help="Small bonus weight for recency (tie-breaker)",
     )
     parser.add_argument(
@@ -350,13 +381,28 @@ def main():
     print(f"Embedding model: {model_name}")
     print(f"Query: {args.query}\n")
 
+    ## Adding an LLM to get the query information
+    client = OpenAI(
+        api_key=os.environ.get("GROQ_API_KEY", "TO_REPLACE"),
+        base_url="https://api.groq.com/openai/v1",
+    )
+
+    intent = extract_query_intent(args.query, client)
+
+    # Let's extract the variables we need
+    extracted_loc = intent.get("location", "Global")
+    final_type = intent.get("category")
+    search_terms = intent.get("search_query", args.query)
+
+    print(f"Query Intent: Category={final_type}, Location={extracted_loc}")
+
     model = SentenceTransformer(model_name)
     qdrant = QdrantClient(url=qdrant_url)
 
-    query_vec = model.encode(args.query).tolist()
-    flt = build_filter(args.minutes, args.source, args.type)
+    query_vec = model.encode(search_terms).tolist()
+    flt = build_filter(args.minutes, args.source, final_type)
 
-    # 1) Retrieve by semantics (dominant)
+    # Retrieve by semantics
     limit = max(args.topk * args.overfetch, args.topk)
     response = qdrant.query_points(
         collection_name=collection,
@@ -372,32 +418,17 @@ def main():
         print("No results found.")
         return
 
-    # 2) Determine query lat/lon (reference point for distance)
+    # Determine query lat/lon (reference point for distance)
     qlat, qlon = parse_latlon(args.qgeo)
-    loc_name = None
 
-    if (qlat is not None) and (qlon is not None):
-        loc_name = "override(--qgeo)"
-        print(f"Using query coords: ({qlat:.6f}, {qlon:.6f})\n")
-    else:
-        loc = detect_query_location(args.query)
-        if loc is not None:
-            loc_name, qlat, qlon = loc
-            print(
-                f"Detected location: {loc_name}  ->  ({qlat:.6f}, {qlon:.6f})\n"
-            )
-        else:
-            if Nominatim is None:
-                print(
-                    "No query location detected (geopy not installed). "
-                    "Install with: pip install geopy\n"
-                )
-            else:
-                print(
-                    "No query location detected from text; spatial bias will be neutral.\n"
-                )
+    # Only attempt geocoding if NOT Global and no override is provided
+    if qlat is None and extracted_loc.lower() != "global":
+        loc = geocode_place(extracted_loc)
+        if loc:
+            _, qlat, qlon = loc
+            print(f"Detected location: {extracted_loc} -> ({qlat}, {qlon})")
 
-    # 3) First compute features (sim, time, distance, spatial score) for all candidates
+    # First compute features (sim, time, distance, spatial score) for all candidates
     scored: List[Tuple[float, float, float, float, Optional[float], Any]] = []
     for i, r in enumerate(points, start=1):
         payload = r.payload or {}
@@ -425,7 +456,7 @@ def main():
         # NOTE: final is computed later (after optional gating)
         scored.append((0.0, sim, sscore, tscore, dist_km, r))
 
-    # 4) OPTIONAL: spatial gate (only if we have query coords + user asked for max-km)
+    # OPTIONAL: spatial gate (only if we have query coords + user asked for max-km)
     gated = scored
     if (args.max_km is not None) and (qlat is not None) and (qlon is not None):
         min_nearby = (
@@ -450,7 +481,7 @@ def main():
                 "Showing best global matches.\n"
             )
 
-    # 5) Compute final score and rank (similarity dominant, space biases it, time small bonus)
+    # Compute final score and rank (similarity dominant, space biases it, time small bonus)
     reranked: List[Tuple[float, float, float, float, Optional[float], Any]] = (
         []
     )
@@ -493,33 +524,37 @@ def main():
         print(f"   text:     {text}")
         print("")
 
-    # 6) Optional LLM final answer
+    # Optional LLM final answer
     if args.llm:
-        latest_ts, ctx = build_context(reranked)
+        latest_ts, now_str, ctx = build_context(reranked)
 
         asof = ms_to_utc_str(latest_ts) if latest_ts is not None else "N/A"
+
         prompt = f"""You are a real-time disaster/event monitor.
-    Use ONLY the context below (do not invent facts).
-    If the context is insufficient or off-topic, say so and suggest widening the time window.
+
+    Current System Time: {now_str}
+    Latest Event in Database: {asof}
 
     User question: {args.query}
 
-    Context (verified events):
+    INSTRUCTIONS:
+    1. Start your response by clearly stating: "Report generated at {now_str}."
+    2. Summarize the situation  based ONLY on the context below. If the context is insufficient or off-topic, say so and suggest widening the time window.
+    3. Begin the summary with the phrase: "As of {asof}, ..."
+    4. If the latest data ({asof}) is older than 24 hours relative to {now_str}, you have to state that there are no new reports in the last 24 hours."
+    5. Provide the response in the following format:
+    - A short summary (starting as instructed above).
+    - Bullet points of the key confirmed facts.
+    - A "Sources" list with the URLs used from the context.
+
+    Context:
     {ctx}
-
-    Write:
-    1) A short summary starting with: "As of {asof}, ..."
-    2) Bullet points of the key confirmed facts
-    3) A "Sources" list with the URLs you used
     """
-
-        client = OpenAI(
-            api_key=os.environ.get("GROQ_API_KEY", "TO_REPLACE"),
-            base_url="https://api.groq.com/openai/v1",
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
         )
-        model = "llama-3.3-70b-versatile"
-        resp = client.responses.create(model=model, input=prompt)
-        print(resp.output_text)
+        print(resp.choices[0].message.content)
         return
 
 

@@ -18,7 +18,9 @@ DLQ_TOPIC = os.getenv("DLQ_TOPIC", "dlq-events")
 DEDUP_TTL_SECS = int(os.getenv("DEDUP_TTL_SECS", "7200"))  # 2h
 CLEANUP_EVERY = int(os.getenv("CLEANUP_EVERY", "200"))
 
-TRUSTED_SOURCES = set(os.getenv("TRUSTED_SOURCES", "usgs,eonet").split(","))
+TRUSTED_SOURCES = set(
+    os.getenv("TRUSTED_SOURCES", "usgs,eonet,gdacs").split(",")
+)
 
 
 def now_utc_ms() -> int:
@@ -50,11 +52,11 @@ def clamp01(x: float) -> float:
 
 def credibility_score(ev: dict) -> float:
     """
-    Defendable heuristic score:
+    Score:
     - provenance (trusted source) is the main signal
     - completeness adds a bit
     - recency adds a bit
-    Output is rounded + stable (no float ugliness).
+    Output is rounded.
     """
     score = 0.0
 
