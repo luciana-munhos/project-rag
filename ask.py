@@ -352,7 +352,7 @@ def main():
     parser.add_argument(
         "--w-time",
         type=float,
-        default=0.05,
+        default=0.1,
         help="Small bonus weight for recency (tie-breaker)",
     )
     parser.add_argument(
