@@ -47,13 +47,16 @@ The pipeline uses a multi-stage approach:
 ### Create and activate the virtual environment
 
 python3 -m venv datastream
+
 source datastream/bin/activate
+
 pip install -r requirements.txt
 
 
 ### Start the Infrastructure (Docker)
 
 This starts Kafka, Zookeeper, and Qdrant:
+
 sudo docker compose up -d
 
 Note: Ensure your docker-compose.yml is configured for Kafka to be accessible at localhost:9092.
@@ -63,27 +66,31 @@ Note: Ensure your docker-compose.yml is configured for Kafka to be accessible at
 Run each component in a separate terminal with the virtual environment activated.
 
 ### Step 1: Processing and Indexing
-Bash
-
 Terminal 1: Verification (Deduplication)
+
 python3 verify-events.py
 
 Terminal 2: Indexing to Vector DB
+
 python3 index-events.py
 
 ## Step 2: Data Ingestion
 Terminal 3: USGS Earthquakes
+
 python3 ingest-usgs.py
 
 Terminal 4: NASA EONET
+
 python3 ingest-eonet.py
 
 ## Step 3: Semantic Querying (RAG)
 
 You must export your API key in the terminal session before running the query tool:
+
 export GROQ_API_KEY="your_actual_key_here"
 
 Run a query:
+
 python3 ask.py "Show me recent floods in Asia" --topk 5 --llm
 
 ## 5. Maintenance & Resetting the System
@@ -92,14 +99,15 @@ Full Reset (Clean Slate)
 If you want to completely wipe the system state:
 
     Delete the Qdrant Collection: Always run this command before stopping Docker to ensure the vector index is properly cleared:
-    Bash
-
+    
 curl -X DELETE http://localhost:6333/collections/events
 
 Stop and Wipe Docker Volumes:
+
 sudo docker compose down -v
 
 Reset Kafka Topics: To recreate topics and clear old messages:
+
 bash reset-topics.sh
 
 ## 6. Search Features (ask.py)
@@ -113,7 +121,9 @@ Spatial Bias: Proximity to the detected location (using Haversine distance); Rec
 
 ## 7. Stopping the Project
 Stop all containers
+
 sudo docker compose stop
 
 Remove containers
+
 sudo docker compose down
